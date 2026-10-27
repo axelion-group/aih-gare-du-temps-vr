@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Plancenoit, 18 juin 1815 — démo VR</title>
+<!--
+  La Gare du Temps — démo VR v0.1
+  Style : gravure animée en 3D (hachures en espace monde, lisibles en stéréo).
+  Faits utilisés (à valider par le CGHL et un historien) :
+  - Vers 15 h, le IVe corps de Bülow fait halte dans le bois de Paris, colonnes de part et d'autre
+    du chemin de Lasne à Plancenoit ; des hussards silésiens ont trouvé le bois inoccupé.
+  - Vers 16 h, les premières brigades débouchent du bois et se dirigent vers Plancenoit.
+  - La grande bataille a commencé vers 11 h 30 – midi ; la pluie diluvienne date de la veille.
+  Topographie, village et église : HYPOTHÈSES de démonstration, pas une reconstitution.
+-->
+<style>
+:root{--paper:#EDE4D3;--ink:#2B2117;--rail:#1F3A2E;--brass:#B8862F;--panel:rgba(237,228,211,.94);color-scheme:light;
+  box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--panel:rgba(30,26,20,.92);--ink:#EDE4D3;color-scheme:dark}}
+:root[data-theme="dark"]{--panel:rgba(30,26,20,.92);--ink:#EDE4D3;color-scheme:dark}
+html,body{margin:0;height:100%;overflow:hidden;background:#EDE4D3;font-family:Georgia,"Times New Roman",serif}
+*,*::before,*::after{box-sizing:inherit}
+canvas{display:block}
+#intro{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;z-index:3;background:rgba(237,228,211,.55)}
+#intro .card{max-width:440px;background:var(--panel);color:var(--ink);padding:26px 26px 22px;border-radius:6px;box-shadow:0 6px 30px rgba(43,33,23,.25)}
+#intro h1{font-size:30px;line-height:1.1;margin:0 0 6px;font-weight:600}
+#intro p{margin:0 0 12px;line-height:1.45;font-size:16px}
+#intro .small{font-size:13px;opacity:.8}
+#start{font:600 15px Arial,Helvetica,sans-serif;background:var(--rail);color:#fff;border:0;border-radius:999px;padding:11px 20px;cursor:pointer;margin-right:8px}
+#start:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+#subs{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom,0px));max-width:min(720px,92vw);
+  background:var(--panel);color:var(--ink);padding:12px 16px;border-radius:6px;font-size:18px;line-height:1.4;display:none;z-index:2}
+#hint{position:fixed;top:calc(12px + env(safe-area-inset-top,0px));left:12px;font:13px Arial,Helvetica,sans-serif;color:#2B2117;background:rgba(237,228,211,.85);padding:6px 9px;border-radius:4px;display:none;z-index:2}
+#VRButton{z-index:4}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/build/three.module.js",
+  "three/addons/": "./vendor/three/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="intro"><div class="card">
+  <h1>Plancenoit, 18 juin 1815</h1>
+  <p>Deux minutes à la lisière du bois de Paris, au moment où les Prussiens arrivent.</p>
+  <p class="small">Démo provisoire : le paysage et le village sont des hypothèses, à valider par des historiens. Dans un casque, utilisez le bouton « Enter VR » ; sur un écran, glissez pour regarder autour de vous.</p>
+  <button id="start" type="button">Commencer sur cet écran</button>
+</div></div>
+<div id="hint">Glissez pour regarder autour de vous</div>
+<div id="subs" role="status" aria-live="polite"></div>
+
+<script type="module">
+import * as THREE from "three";
+import { VRButton } from "three/addons/webxr/VRButton.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+
+const PAPER = new THREE.Color("#EDE4D3"), INK = new THREE.Color("#2B2117");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType("local-floor");
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const scene = new THREE.Scene();
+scene.background = PAPER.clone();
+scene.fog = new THREE.Fog(PAPER, 220, 1100);
+const rig = new THREE.Group(); scene.add(rig);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 3000);
+camera.position.set(0, 1.6, 0); rig.add(camera);
+
+/* ---------- Relief (hypothétique) ---------- */
+const VILLAGE = new THREE.Vector2(-180, -620);
+function rawH(x, z) {
+  return 6 * Math.sin(x * 0.004) * Math.cos(z * 0.003) + 4 * Math.sin((x + z) * 0.007)
+    + 20 * Math.exp(-((x - VILLAGE.x) ** 2 + (z - VILLAGE.y) ** 2) / (2 * 170 ** 2))
+    + 8 * Math.exp(-(x * x + z * z) / (2 * 70 ** 2));
+}
+const H0 = rawH(0, 0);
+const h = (x, z) => rawH(x, z) - H0;
+
+/* ---------- Matériau gravure ---------- */
+const gravureVS = `
+varying vec3 vW; varying vec3 vN;
+void main(){
+  mat4 m = modelMatrix;
+  #ifdef USE_INSTANCING
+    m = modelMatrix * instanceMatrix;
+  #endif
+  vec4 w = m * vec4(position,1.0);
+  vW = w.xyz; vN = normalize(mat3(m) * normal);
+  gl_Position = projectionMatrix * viewMatrix * w;
+}`;
+const gravureFS = `
+uniform vec3 uLight; uniform vec3 uInk; uniform vec3 uPaper; uniform float uTone; uniform float uSpacing; uniform float uWidth;
+uniform float uFogNear; uniform float uFogFar;
+varying vec3 vW; varying vec3 vN;
+float hatch(float v, float w){
+  float g = fract(v); float d = min(g, 1.0 - g);
+  float aa = fwidth(v);
+  float l = 1.0 - smoothstep(w - aa, w + aa, d);
+  float fade = smoothstep(0.18, 0.5, aa);
+  return mix(l, w * 2.0, fade);
+}
+void main(){
+  vec3 n = normalize(vN);
+  float d = clamp(dot(n, normalize(uLight)), 0.0, 1.0);
+  float t = uTone * (0.35 + 0.65 * d);
+  float v1 = (vW.x * 0.7 + vW.y * 0.9 + vW.z * 0.3) / uSpacing;
+  float v2 = (vW.x * 0.3 - vW.y * 0.8 + vW.z * 0.7) / uSpacing;
+  float v3 = (vW.z * 0.9 - vW.x * 0.5 + vW.y * 0.4) / (uSpacing * 0.7);
+  float ink = 0.0;
+  ink = max(ink, hatch(v1, uWidth) * (1.0 - smoothstep(0.70, 0.82, t)));
+  ink = max(ink, hatch(v2, uWidth) * (1.0 - smoothstep(0.45, 0.58, t)));
+  ink = max(ink, hatch(v3, uWidth * 1.2) * (1.0 - smoothstep(0.22, 0.34, t)));
+  vec3 c = mix(uPaper, uInk, ink * 0.88);
+  float f = smoothstep(uFogNear, uFogFar, length(vW - cameraPosition));
+  gl_FragColor = vec4(mix(c, uPaper, f), 1.0);
+}`;
+function gravure(tone, spacing = 0.45, width = 0.11) {
+  return new THREE.ShaderMaterial({
+    vertexShader: gravureVS, fragmentShader: gravureFS,
+    uniforms: {
+      uLight: { value: new THREE.Vector3(-0.6, 0.7, 0.35) }, uInk: { value: INK }, uPaper: { value: PAPER },
+      uTone: { value: tone }, uSpacing: { value: spacing }, uWidth: { value: width }, uFogNear: { value: 220 }, uFogFar: { value: 1100 }
+    }
+  });
+}
+const lineMat = new THREE.LineBasicMaterial({ color: INK, transparent: true, opacity: 0.85 });
+
+/* ---------- Sol ---------- */
+const ground = new THREE.PlaneGeometry(2600, 2600, 160, 160); ground.rotateX(-Math.PI / 2);
+const gp = ground.attributes.position;
+for (let i = 0; i < gp.count; i++) gp.setY(i, h(gp.getX(i), gp.getZ(i)));
+ground.computeVertexNormals();
+scene.add(new THREE.Mesh(ground, gravure(0.95, 0.7, 0.045)));
+
+function polyline(pts, mat = lineMat) {
+  const g = new THREE.BufferGeometry().setFromPoints(pts.map(([x, z]) => new THREE.Vector3(x, h(x, z) + 0.3, z)));
+  const l = new THREE.Line(g, mat); scene.add(l); return l;
+}
+// Chemin de Lasne à Plancenoit (tracé hypothétique) et limites de champs
+const road = []; for (let k = 0; k <= 60; k++) { const s = k / 60; road.push([30 * (1 - s) + VILLAGE.x * s + 40 * Math.sin(s * 3), 40 * (1 - s) + VILLAGE.y * s]); }
+polyline(road); polyline(road.map(([x, z]) => [x + 4, z + 1]));
+[[[-500, -200], [-150, -260], [200, -180], [500, -240]], [[-450, -420], [-80, -380], [300, -450]], [[60, -100], [120, -400], [90, -700]]]
+  .forEach(p => polyline(p, new THREE.LineBasicMaterial({ color: INK, transparent: true, opacity: 0.35 })));
+
+/* ---------- Arbres : lisière du bois de Paris ---------- */
+const treeG = mergeGeometries([
+  new THREE.CylinderGeometry(0.25, 0.35, 3, 5).translate(0, 1.5, 0),
+  new THREE.ConeGeometry(3.2, 9, 7).translate(0, 7, 0)
+]);
+const trees = [];
+for (let i = 0; i < 1400; i++) {
+  const x = (Math.random() - 0.5) * 900, z = (Math.random() - 0.3) * 420;
+  if (z < 12 && x < 170) continue;
+  if (Math.hypot(x, z) < 24) continue; trees.push([x, z]);
+}
+for (let i = 0; i < 160; i++) { const x = (Math.random() - 0.5) * 1600, z = -150 - Math.random() * 900; if (Math.hypot(x - VILLAGE.x, z - VILLAGE.y) > 110) trees.push([x, z]); }
+const treeMesh = new THREE.InstancedMesh(treeG, gravure(0.55, 0.35), trees.length);
+const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), pos = new THREE.Vector3();
+trees.forEach(([x, z], i) => { const s = 0.7 + Math.random() * 0.7; m4.compose(pos.set(x, h(x, z), z), q.setFromEuler(new THREE.Euler(0, Math.random() * 6, 0)), sc.set(s, s * (0.8 + Math.random() * 0.5), s)); treeMesh.setMatrixAt(i, m4); });
+scene.add(treeMesh);
+
+/* ---------- Plancenoit (village hypothétique) ---------- */
+function prism(w, d, hh) {
+  const g = new THREE.BufferGeometry();
+  const v = [-w/2,0,-d/2, w/2,0,-d/2, 0,hh,-d/2,  -w/2,0,d/2, 0,hh,d/2, w/2,0,d/2,
+    -w/2,0,-d/2, 0,hh,-d/2, 0,hh,d/2,  -w/2,0,-d/2, 0,hh,d/2, -w/2,0,d/2,
+     w/2,0,-d/2, w/2,0,d/2, 0,hh,d/2,   w/2,0,-d/2, 0,hh,d/2, 0,hh,-d/2];
+  g.setAttribute("position", new THREE.Float32BufferAttribute(v, 3)); g.computeVertexNormals(); return g;
+}
+const houses = [];
+for (let i = 0; i < 34; i++) {
+  const a = Math.random() * Math.PI * 2, r = 25 + Math.random() * 95;
+  const x = VILLAGE.x + Math.cos(a) * r, z = VILLAGE.y + Math.sin(a) * r * 0.8;
+  const w = 8 + Math.random() * 6, d = 6 + Math.random() * 3, hh = 4 + Math.random() * 1.5, rot = Math.random() * Math.PI;
+  const box = new THREE.BoxGeometry(w, hh, d).translate(0, hh / 2, 0);
+  const roof = prism(w + 0.6, d + 0.6, 3.2).translate(0, hh, 0);
+  [box, roof].forEach(g => { g.rotateY(rot); g.translate(x, h(x, z) - 0.3, z); });
+  houses.push(box.toNonIndexed(), roof);
+}
+const cx = VILLAGE.x + 10, cz = VILLAGE.y - 5, cy = h(cx, cz) - 0.3;
+const church = [
+  new THREE.BoxGeometry(24, 10, 11).translate(cx, cy + 5, cz).toNonIndexed(),
+  prism(25, 12, 6).rotateY(Math.PI / 2).translate(cx, cy + 10, cz),
+  new THREE.BoxGeometry(7, 20, 7).translate(cx + 15, cy + 10, cz).toNonIndexed(),
+  new THREE.ConeGeometry(5.2, 14, 4).rotateY(Math.PI / 4).translate(cx + 15, cy + 27, cz).toNonIndexed()
+];
+const villageG = mergeGeometries([...houses, ...church].map(g => { g.deleteAttribute("uv"); return g; }));
+scene.add(new THREE.Mesh(villageG, gravure(0.85, 0.3)));
+scene.add(new THREE.LineSegments(new THREE.EdgesGeometry(villageG, 25), lineMat));
+
+/* ---------- Fumées de la grande bataille, à l'ouest ---------- */
+function smokeTexture() {
+  const c = document.createElement("canvas"); c.width = c.height = 256; const x = c.getContext("2d");
+  x.strokeStyle = "rgba(43,33,23,0.55)"; x.lineWidth = 1.2;
+  for (let k = 0; k < 7; k++) { const r = 40 + Math.random() * 60, px = 128 + (Math.random() - 0.5) * 80, py = 128 + (Math.random() - 0.5) * 60;
+    x.beginPath(); x.arc(px, py, r, 0, Math.PI * 2); x.stroke();
+    for (let l = -r; l < r; l += 7) { const hw = Math.sqrt(Math.max(0, r * r - l * l)) * 0.8; x.beginPath(); x.moveTo(px - hw, py + l); x.lineTo(px + hw, py + l - hw * 0.4); x.globalAlpha = 0.35; x.stroke(); x.globalAlpha = 1; } }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const smokeMat = new THREE.SpriteMaterial({ map: smokeTexture(), transparent: true, opacity: 0.7, depthWrite: false });
+const smokes = [];
+for (let i = 0; i < 26; i++) {
+  const s = new THREE.Sprite(smokeMat); const x = -650 - Math.random() * 500, z = -150 - Math.random() * 700;
+  s.position.set(x, h(x, z) + 25 + Math.random() * 30, z); const k = 60 + Math.random() * 70; s.scale.set(k, k * 0.7, 1);
+  s.userData.v = 0.5 + Math.random(); scene.add(s); smokes.push(s);
+}
+
+/* ---------- Les Prussiens ---------- */
+const soldierG = mergeGeometries([
+  new THREE.CylinderGeometry(0.22, 0.26, 1.25, 6).translate(0, 0.62, 0),
+  new THREE.SphereGeometry(0.15, 6, 4).translate(0, 1.38, 0),
+  new THREE.CylinderGeometry(0.13, 0.14, 0.24, 6).translate(0, 1.58, 0),
+  new THREE.BoxGeometry(0.05, 1.5, 0.05).translate(0.24, 1.0, 0)
+].map(g => g.toNonIndexed()).map(g => { g.deleteAttribute("uv"); return g; }));
+const riderG = mergeGeometries([
+  new THREE.BoxGeometry(0.55, 0.75, 2.1).translate(0, 1.25, 0),
+  new THREE.BoxGeometry(0.35, 0.55, 0.7).rotateX(-0.6).translate(0, 1.75, -1.1),
+  ...[[-0.2, -0.8], [0.2, -0.8], [-0.2, 0.8], [0.2, 0.8]].map(([x, z]) => new THREE.CylinderGeometry(0.07, 0.07, 1, 4).translate(x, 0.5, z)),
+  new THREE.CylinderGeometry(0.2, 0.22, 0.85, 6).translate(0, 2.05, 0),
+  new THREE.SphereGeometry(0.14, 6, 4).translate(0, 2.6, 0)
+].map(g => g.toNonIndexed()).map(g => { g.deleteAttribute("uv"); return g; }));
+const troopMat = gravure(0.42, 0.18);
+const target = new THREE.Vector3(VILLAGE.x, 0, VILLAGE.y);
+function formation(geo, rows, cols, gap, x0, z0) {
+  const mesh = new THREE.InstancedMesh(geo, troopMat, rows * cols);
+  const dir = new THREE.Vector3(target.x - x0, 0, target.z - z0).normalize();
+  const yaw = Math.atan2(-dir.x, -dir.z); let i = 0;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const lx = (c - cols / 2) * gap * 0.75, lz = r * gap * 1.1;
+    m4.compose(pos.set(lx + (Math.random() - 0.5) * 0.15, 0, lz), q.identity(), sc.set(1, 1, 1)); mesh.setMatrixAt(i++, m4);
+  }
+  mesh.position.set(x0, h(x0, z0), z0); mesh.rotation.y = yaw;
+  mesh.userData = { dir, x: x0, z: z0 }; scene.add(mesh);
+  const flag = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1), gravure(0.25, 0.08)); flag.material.side = THREE.DoubleSide;
+  flag.position.set(0, 3.2, -0.2); const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 3.6, 4), troopMat); pole.position.set(-0.7, 1.8, -0.2);
+  mesh.add(flag, pole);
+  return mesh;
+}
+const columns = [
+  formation(soldierG, 10, 22, 1.0, 120, -15), formation(soldierG, 10, 22, 1.0, 150, 5),
+  formation(soldierG, 10, 22, 1.0, 185, -25), formation(soldierG, 10, 22, 1.0, 215, 0)
+];
+const hussars = formation(riderG, 3, 6, 2.6, 95, -40);
+columns.forEach(c => c.visible = true);
+
+/* ---------- Panneau de récit en VR ---------- */
+const pc = document.createElement("canvas"); pc.width = 1024; pc.height = 300;
+const pctx = pc.getContext("2d"); const ptex = new THREE.CanvasTexture(pc); ptex.colorSpace = THREE.SRGBColorSpace;
+const panel = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 0.5), new THREE.MeshBasicMaterial({ map: ptex, transparent: true, fog: false }));
+panel.position.set(0, 1.05, -2.2); panel.rotation.x = -0.28; panel.visible = false; rig.add(panel);
+function drawPanel(text) {
+  pctx.clearRect(0, 0, 1024, 300); pctx.fillStyle = "rgba(237,228,211,0.93)"; pctx.fillRect(0, 0, 1024, 300);
+  pctx.strokeStyle = "#2B2117"; pctx.lineWidth = 4; pctx.strokeRect(10, 10, 1004, 280);
+  pctx.fillStyle = "#2B2117"; pctx.font = "38px Georgia, serif";
+  const words = text.split(" "); let line = "", y = 78;
+  for (const w of words) { const t = line ? line + " " + w : w; if (pctx.measureText(t).width > 940) { pctx.fillText(line, 42, y); y += 52; line = w; } else line = t; }
+  pctx.fillText(line, 42, y); ptex.needsUpdate = true;
+}
+
+/* ---------- Récit ---------- */
+const CUES = [
+  [2, "18 juin 1815, vers trois heures de l’après-midi. Vous êtes à la lisière du bois de Paris, sur le territoire de l’actuelle commune de Lasne."],
+  [20, "Depuis le matin, les Prussiens du général von Bülow marchent depuis Wavre. Ils ont franchi la vallée de la Lasne par Chapelle-Saint-Lambert, sur des chemins détrempés par l’orage de la veille."],
+  [40, "Des hussards silésiens ont fouillé le bois : il est vide. Personne ne garde le flanc droit de Napoléon."],
+  [58, "Vers seize heures, les premières brigades sortent du bois et marchent vers Plancenoit, là-bas, sur sa colline."],
+  [80, "À l’ouest, la grande bataille fait rage depuis la fin de la matinée. L’arrivée des Prussiens va tout changer."],
+  [104, "La suite de cette histoire vous attend au musée. Reconstitution provisoire, à valider par des historiens."]
+];
+const subs = document.getElementById("subs");
+function say(text) {
+  subs.textContent = text; subs.style.display = renderer.xr.isPresenting ? "none" : "block";
+  drawPanel(text);
+  try { if ("speechSynthesis" in window) { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = "fr-BE"; u.rate = 0.95; speechSynthesis.speak(u); } } catch (e) {}
+}
+
+/* ---------- Sons (synthétisés) ---------- */
+let ac = null, drumsOn = false;
+function startAudio() {
+  try {
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    const len = ac.sampleRate * 2, buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const wind = ac.createBufferSource(); wind.buffer = buf; wind.loop = true;
+    const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 380;
+    const g = ac.createGain(); g.gain.value = 0.045; wind.connect(lp).connect(g).connect(ac.destination); wind.start();
+    const boom = () => {
+      const t = ac.currentTime, o = ac.createOscillator(), og = ac.createGain();
+      o.frequency.setValueAtTime(58, t); o.frequency.exponentialRampToValueAtTime(26, t + 1.2);
+      og.gain.setValueAtTime(0.0001, t); og.gain.exponentialRampToValueAtTime(0.22, t + 0.03); og.gain.exponentialRampToValueAtTime(0.0001, t + 1.6);
+      o.connect(og).connect(ac.destination); o.start(t); o.stop(t + 1.7);
+      setTimeout(boom, 2500 + Math.random() * 5000);
+    };
+    setTimeout(boom, 1500);
+    const drum = () => {
+      if (drumsOn) {
+        const t = ac.currentTime, s = ac.createBufferSource(); s.buffer = buf;
+        const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 900; bp.Q.value = 1.2;
+        const dg = ac.createGain(); dg.gain.setValueAtTime(0.09, t); dg.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+        s.connect(bp).connect(dg).connect(ac.destination); s.start(t, Math.random(), 0.15);
+      }
+      setTimeout(drum, drumsOn && Math.random() < 0.3 ? 160 : 480);
+    };
+    drum();
+  } catch (e) {}
+}
+
+/* ---------- Démarrage et contrôles ---------- */
+let started = false, t0 = 0, nextCue = 0;
+const initial = [...columns, hussars].map(m => [m, m.userData.x, m.userData.z]);
+function resetTroops(){ initial.forEach(([m, x, z]) => { m.userData.x = x; m.userData.z = z; m.position.set(x, h(x, z), z); }); }
+const clock = new THREE.Clock();
+function start() {
+  if (started) return; started = true; t0 = clock.elapsedTime; nextCue = 0; resetTroops();
+  document.getElementById("intro").style.display = "none";
+  if (!renderer.xr.isPresenting) document.getElementById("hint").style.display = "block";
+  if (!ac) startAudio();
+}
+document.getElementById("start").addEventListener("click", start);
+renderer.xr.addEventListener("sessionstart", () => { start(); panel.visible = true; subs.style.display = "none"; document.getElementById("hint").style.display = "none"; });
+renderer.xr.addEventListener("sessionend", () => { panel.visible = false; });
+
+let yaw = Math.atan2(-VILLAGE.x, -VILLAGE.y), pitch = -0.04, drag = null;
+renderer.domElement.addEventListener("pointerdown", e => { drag = [e.clientX, e.clientY]; });
+addEventListener("pointerup", () => drag = null);
+addEventListener("pointermove", e => {
+  if (!drag) return; yaw += (e.clientX - drag[0]) * 0.004; pitch = Math.max(-0.6, Math.min(0.5, pitch + (e.clientY - drag[1]) * 0.003)); drag = [e.clientX, e.clientY];
+});
+addEventListener("resize", () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+/* ---------- Boucle ---------- */
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05), now = clock.elapsedTime;
+  if (!renderer.xr.isPresenting) camera.rotation.set(pitch, yaw, 0, "YXZ");
+  smokes.forEach(s => { s.position.y += s.userData.v * 0.02; if (s.position.y > 140) s.position.y = 40; });
+  if (started) {
+    const t = now - t0;
+    if (nextCue < CUES.length && t >= CUES[nextCue][0]) { say(CUES[nextCue][1]); nextCue++; }
+    const move = (m, speed) => { const u = m.userData; u.x += u.dir.x * speed * dt; u.z += u.dir.z * speed * dt; m.position.set(u.x, h(u.x, u.z), u.z); };
+    if (t > 40) move(hussars, 3.2);
+    if (t > 58) { drumsOn = true; columns.forEach((c, i) => move(c, 1.25 + i * 0.05)); }
+    if (t > 122) { started = false; nextCue = 0; drumsOn = false; document.getElementById("intro").style.display = renderer.xr.isPresenting ? "none" : "flex"; document.getElementById("start").textContent = "Revoir la démo"; }
+  }
+  renderer.render(scene, camera);
+});
+drawPanel("Plancenoit, 18 juin 1815");
+</script>
+</body>
+</html>
